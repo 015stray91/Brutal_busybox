@@ -1,0 +1,99 @@
+name: Build Brutal Busybox Static Binaries
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+      - main
+
+jobs:
+  build-matrix:
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        # Build both targeted architectures simultaneously in parallel
+        architecture: [arm64, amd64]
+
+    steps:
+      - name: Checkout Source Tree
+        uses: actions/checkout@v4
+
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y make bzip2 xz-utils git bc unzip wget gcc g++ gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+
+      - name: Set Up Toolchain Architecture
+        run: |
+          if [ "${{ matrix.architecture }}" = "arm64" ]; then
+            echo "📥 Pulling Android NDK r26b for arm64 target..."
+            wget -q https://google.com
+            unzip -q android-ndk-r26b-linux.zip
+            echo "NDK_ROOT=$GITHUB_WORKSPACE/android-ndk-r26b" >> $GITHUB_ENV
+            echo "USE_NDK=true" >> $GITHUB_ENV
+          else
+            echo "💻 Using native Linux toolchain for amd64 target..."
+            echo "USE_NDK=false" >> $GITHUB_ENV
+          fi
+
+      - name: Configure and Apply Defconfig
+        run: |
+          if [ -f configs/android_ndk_defconfig ] && [ "${{ matrix.architecture }}" = "arm64" ]; then
+            make android_ndk_defconfig
+          elif [ -f configs/defconfig ]; then
+            make defconfig
+          else
+            make allyesconfig
+          fi
+
+          # Force standalone static compilation configuration rules across the board
+          sed -i 's/CONFIG_STATIC=n/CONFIG_STATIC=y/' .config
+          sed -i 's/# CONFIG_STATIC is not set/CONFIG_STATIC=y/' .config
+          sed -i 's/CONFIG_PIE=y/CONFIG_PIE=n/' .config
+          sed -i 's/CONFIG_BUILD_LIBBUSYBOX=y/CONFIG_BUILD_LIBBUSYBOX=n/' .config
+
+      - name: Patch Bionic Platform Headers (ARM64 Only)
+        if: matrix.architecture == 'arm64'
+        run: |
+          echo "🛠️ Patching include/platform.h for Android Bionic compatibility..."
+          
+          # Fix the 'byteswap.h' missing header bug for the Android target pipeline
+          sed -i 's/# include <byteswap.h>/# include <sys\/endian.h>\n# define bswap_16 bswap16\n# define bswap_32 bswap32\n# define bswap_64 bswap64/' include/platform.h
+          
+          echo "CONFIG_EXTRA_CFLAGS=\"-O3 -march=armv8-a -static\"" >> .config
+
+      - name: Patch Linux Platform Headers (AMD64 Only)
+        if: matrix.architecture == 'amd64'
+        run: |
+          echo "CONFIG_EXTRA_CFLAGS=\"-O3 -m64 -static\"" >> .config
+
+      - name: Assemble Brutal Busybox Binary
+        run: |
+          if [ "$USE_NDK" = "true" ]; then
+            TOOLCHAIN="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin"
+            export ARCH=arm64
+            export CROSS_COMPILE="$TOOLCHAIN/aarch64-linux-android-"
+            make CC="$TOOLCHAIN/aarch64-linux-android21-clang" -j$(nproc) busybox
+          else
+            export ARCH=x86_64
+            make -j$(nproc) busybox
+          fi
+
+      - name: Verify Compiled Artifact Structure
+        run: |
+          if [ ! -f busybox ]; then
+            echo "[CRITICAL ERROR]: Busybox failed to compile for ${{ matrix.architecture }}!"
+            exit 1
+          fi
+          file busybox
+          ls -lh busybox
+          mv busybox busybox-${{ matrix.architecture }}
+
+      - name: Upload Static Binary Asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: brutal-busybox-static-${{ matrix.architecture }}
+          path: busybox-${{ matrix.architecture }}
+          if-no-files-found: error
