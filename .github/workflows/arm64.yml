@@ -18,18 +18,19 @@ jobs:
       - name: Install Build Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y make bzip2 xz-utils gcc-aarch64-linux-gnu g++-aarch64-linux-gnu git bc
+          sudo apt-get install -y make bzip2 xz-utils git bc unzip wget
 
-      - name: Set Up Android NDK Toolchain
-        uses: android-actions/setup-ndk@v3
-        id: setup-ndk
-        with:
-          ndk-version: r26b
-          add-to-path: true
+      - name: Download Official Android NDK r30 from Google
+        run: |
+          echo "📥 Downloading official NDK r30 directly from Google..."
+          wget -q https://dl.google.com/android/repository/android-ndk-r30-linux.zip
+          
+          echo "📦 Extracting toolchain..."
+          unzip -q android-ndk-r30-linux.zip
+          echo "NDK_ROOT=$GITHUB_WORKSPACE/android-ndk-r30" >> $GITHUB_ENV
 
       - name: Configure and Apply Defconfig
         run: |
-          # Use your maximum optimization profile configuration
           if [ -f configs/android_ndk_defconfig ]; then
             make android_ndk_defconfig
           elif [ -f configs/defconfig ]; then
@@ -38,31 +39,32 @@ jobs:
             make allyesconfig
           fi
 
-          # Force absolute standalone static compilation flags into the config layer
+          # Force standalone static compilation configuration rules
           sed -i 's/CONFIG_STATIC=n/CONFIG_STATIC=y/' .config
           sed -i 's/# CONFIG_STATIC is not set/CONFIG_STATIC=y/' .config
           sed -i 's/CONFIG_PIE=y/CONFIG_PIE=n/' .config
           sed -i 's/CONFIG_BUILD_LIBBUSYBOX=y/CONFIG_BUILD_LIBBUSYBOX=n/' .config
           
-          # Force compiler optimizations for modern architectures
+          # Force maximum optimizations for modern ARM64 layouts
           echo "CONFIG_EXTRA_CFLAGS=\"-O3 -march=armv8-a -static\"" >> .config
 
-      - name: Assemble Brutal Busybox Binary
+      - name: Assemble Brutal Busybox Binary via NDK Clang (r30 toolchain)
         run: |
-          # Use the AArch64 NDK cross-compiler target pipeline
-          export ARCH=arm64
-          export CROSS_COMPILE=aarch64-linux-gnu-
+          # Map variables straight to the extracted Google r30 toolchain binaries folder
+          TOOLCHAIN="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin"
           
-          make -j$(nproc) busybox
+          export ARCH=arm64
+          export CROSS_COMPILE="$TOOLCHAIN/aarch64-linux-android-"
+          
+          # Force the build to use the NDK Clang wrapper targeting the stable Android API level
+          make CC="$TOOLCHAIN/aarch64-linux-android21-clang" -j$(nproc) busybox
 
-      - name: Verify Binary Matrix and Structure
+      - name: Verify Binary Matrix
         run: |
           if [ ! -f busybox ]; then
             echo "[CRITICAL ERROR]: Busybox binary failed to assemble!"
             exit 1
           fi
-          
-          # Trace compilation metrics
           file busybox
           ls -lh busybox
 
