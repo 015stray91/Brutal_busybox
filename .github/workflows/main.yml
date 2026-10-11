@@ -1,0 +1,94 @@
+name: Build AnyRealm Dual Architecture Brutal Busybox
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+      - main
+
+jobs:
+  build-anyrealm-matrix:
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        # Match your exact architectural grouping mirror parameters
+        target_env: [anyrealm-arm64, anyrealm-amd64]
+
+    steps:
+      - name: Checkout Source Tree
+        uses: actions/checkout@v4
+
+      - name: Install Cross-Build Toolchains
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y make bzip2 xz-utils git bc unzip wget gcc g++ gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+
+      - name: Fetch Official Google NDK (AnyRealm Mobile Mirror Only)
+        if: matrix.target_env == 'anyrealm-arm64'
+        run: |
+          echo "📥 Fetching official Google NDK r26b for arm64/android-linux target..."
+          wget -q https://google.com
+          unzip -q android-ndk-r26b-linux.zip
+          echo "NDK_ROOT=$GITHUB_WORKSPACE/android-ndk-r26b" >> $GITHUB_ENV
+
+      - name: Configure Applet Matrix Defconfig
+        run: |
+          if [ "${{ matrix.target_env }}" = "anyrealm-arm64" ] && [ -f configs/android_ndk_defconfig ]; then
+            make android_ndk_defconfig
+          elif [ -f configs/defconfig ]; then
+            make defconfig
+          else
+            make allyesconfig
+          fi
+
+          # Force standalone static compilation rules to drop shared library tracking dependencies
+          sed -i 's/CONFIG_STATIC=n/CONFIG_STATIC=y/' .config
+          sed -i 's/# CONFIG_STATIC is not set/CONFIG_STATIC=y/' .config
+          sed -i 's/CONFIG_PIE=y/CONFIG_PIE=n/' .config
+          sed -i 's/CONFIG_BUILD_LIBBUSYBOX=y/CONFIG_BUILD_LIBBUSYBOX=n/' .config
+
+      - name: Inject Preprocessor Patch & Target CFLAGS
+        run: |
+          if [ "${{ matrix.target_env }}" = "anyrealm-arm64" ]; then
+            echo "🛠️ Patching include/platform.h for unified mobile mirror compatibility..."
+            # Replace missing glibc byteswap.h calls with native sys/endian.h structures
+            sed -i 's/# include <byteswap.h>/# include <sys\/endian.h>\n# define bswap_16 bswap16\n# define bswap_32 bswap32\n# define bswap_64 bswap64/' include/platform.h
+            echo "CONFIG_EXTRA_CFLAGS=\"-O3 -march=armv8-a -static -DANDROID -D__ANDROID__\"" >> .config
+          else
+            echo "💻 Injecting native 64-bit Intel/AMD64 optimization parameters..."
+            echo "CONFIG_EXTRA_CFLAGS=\"-O3 -m64 -static\"" >> .config
+          fi
+
+      - name: Assemble Statically Linked Brutal Busybox Binary
+        run: |
+          if [ "${{ matrix.target_env }}" = "anyrealm-arm64" ]; then
+            TOOLCHAIN="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin"
+            export ARCH=arm64
+            export CROSS_COMPILE="$TOOLCHAIN/aarch64-linux-android-"
+            
+            # Cross-compile through your verified NDK clang layer
+            make CC="$TOOLCHAIN/aarch64-linux-android21-clang" HOSTCC=gcc -j$(nproc) busybox
+          else
+            export ARCH=x86_64
+            # Build the Intel native binary pair from the exact same config baseline
+            make HOSTCC=gcc -j$(nproc) busybox
+          fi
+
+      - name: Verify Binary Matrix and Rename
+        run: |
+          if [ ! -f busybox ]; then
+            echo "[CRITICAL ERROR]: Brutal Busybox failed to assemble for ${{ matrix.target_env }}!"
+            exit 1
+          fi
+          file busybox
+          ls -lh busybox
+          mv busybox brutal-busybox-${{ matrix.target_env }}
+
+      - name: Upload Static Binary Asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: brutal-busybox-${{ matrix.target_env }}
+          path: brutal-busybox-${{ matrix.target_env }}
+          if-no-files-found: error
