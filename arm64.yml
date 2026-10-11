@@ -1,0 +1,74 @@
+name: Build Brutal Busybox Static Binary
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+      - main
+
+jobs:
+  build-aarch64:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout Source Tree
+        uses: actions/checkout@v4
+
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y make bzip2 xz-utils gcc-aarch64-linux-gnu g++-aarch64-linux-gnu git bc
+
+      - name: Set Up Android NDK Toolchain
+        uses: android-actions/setup-ndk@v3
+        id: setup-ndk
+        with:
+          ndk-version: r26b
+          add-to-path: true
+
+      - name: Configure and Apply Defconfig
+        run: |
+          # Use your maximum optimization profile configuration
+          if [ -f configs/android_ndk_defconfig ]; then
+            make android_ndk_defconfig
+          elif [ -f configs/defconfig ]; then
+            make defconfig
+          else
+            make allyesconfig
+          fi
+
+          # Force absolute standalone static compilation flags into the config layer
+          sed -i 's/CONFIG_STATIC=n/CONFIG_STATIC=y/' .config
+          sed -i 's/# CONFIG_STATIC is not set/CONFIG_STATIC=y/' .config
+          sed -i 's/CONFIG_PIE=y/CONFIG_PIE=n/' .config
+          sed -i 's/CONFIG_BUILD_LIBBUSYBOX=y/CONFIG_BUILD_LIBBUSYBOX=n/' .config
+          
+          # Force compiler optimizations for modern architectures
+          echo "CONFIG_EXTRA_CFLAGS=\"-O3 -march=armv8-a -static\"" >> .config
+
+      - name: Assemble Brutal Busybox Binary
+        run: |
+          # Use the AArch64 NDK cross-compiler target pipeline
+          export ARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          
+          make -j$(nproc) busybox
+
+      - name: Verify Binary Matrix and Structure
+        run: |
+          if [ ! -f busybox ]; then
+            echo "[CRITICAL ERROR]: Busybox binary failed to assemble!"
+            exit 1
+          fi
+          
+          # Trace compilation metrics
+          file busybox
+          ls -lh busybox
+
+      - name: Upload Static Binary Asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: brutal-busybox-static-arm64
+          path: busybox
+          if-no-files-found: error
